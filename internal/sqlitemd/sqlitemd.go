@@ -1,3 +1,4 @@
+// Package sqlitemd exposes compatibility wrappers for SQLite metadata.
 package sqlitemd
 
 import (

@@ -2,6 +2,7 @@ package createrepo
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -207,7 +208,7 @@ func ParseRepomd(r io.Reader) (*Repomd, error) {
 
 	for {
 		tok, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

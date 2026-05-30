@@ -18,13 +18,21 @@ import (
 type ChecksumType int
 
 const (
+	// ChecksumUnknown represents an unset or unsupported checksum algorithm.
 	ChecksumUnknown ChecksumType = iota
+	// ChecksumMD5 represents the legacy MD5 metadata checksum.
 	ChecksumMD5
+	// ChecksumSHA represents the legacy SHA-1 compatibility checksum name.
 	ChecksumSHA
+	// ChecksumSHA1 represents SHA-1 metadata checksums.
 	ChecksumSHA1
+	// ChecksumSHA224 represents SHA-224 metadata checksums.
 	ChecksumSHA224
+	// ChecksumSHA256 represents SHA-256 metadata checksums.
 	ChecksumSHA256
+	// ChecksumSHA384 represents SHA-384 metadata checksums.
 	ChecksumSHA384
+	// ChecksumSHA512 represents SHA-512 metadata checksums.
 	ChecksumSHA512
 )
 
@@ -54,6 +62,8 @@ func ChecksumTypeFromName(name string) ChecksumType {
 // Name returns the canonical metadata name for a checksum type.
 func (t ChecksumType) Name() (string, bool) {
 	switch t {
+	case ChecksumUnknown:
+		return "", false
 	case ChecksumMD5:
 		return "md5", true
 	case ChecksumSHA:
@@ -84,6 +94,8 @@ func (t ChecksumType) String() string {
 // NewHash creates a streaming hash.Hash for a checksum type.
 func (t ChecksumType) NewHash() (hash.Hash, error) {
 	switch t {
+	case ChecksumUnknown:
+		return nil, fmt.Errorf("unknown checksum type: %d", t)
 	case ChecksumMD5:
 		return md5.New(), nil
 	case ChecksumSHA, ChecksumSHA1:

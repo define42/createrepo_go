@@ -1,3 +1,4 @@
+// Package delta exposes compatibility wrappers for delta RPM generation.
 package delta
 
 import (

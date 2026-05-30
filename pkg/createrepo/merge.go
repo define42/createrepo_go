@@ -88,11 +88,13 @@ func (a *mergeAccumulator) preferNew(existing, candidate Package) bool {
 		return false
 	}
 	switch a.method {
+	case mergeMethodRepo:
+		return false
 	case mergeMethodTimestamp:
 		return packageBuildTime(candidate) > packageBuildTime(existing)
 	case mergeMethodNVR:
 		return compareEVR(candidate, existing) > 0
-	default: // mergeMethodRepo: first repository wins.
+	default:
 		return false
 	}
 }

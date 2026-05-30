@@ -1,3 +1,4 @@
+// Package rpm exposes compatibility wrappers for reading RPM package metadata.
 package rpm
 
 import cr "github.com/define42/createrepo_go/pkg/createrepo"

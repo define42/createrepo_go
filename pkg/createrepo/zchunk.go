@@ -407,7 +407,7 @@ func readZchunkInt(data []byte, pos *int) (uint64, error) {
 			return 0, io.ErrUnexpectedEOF
 		}
 		b := data[*pos]
-		*pos = *pos + 1
+		*pos++
 		if shift >= 64 {
 			return 0, fmt.Errorf("zchunk integer overflows uint64")
 		}

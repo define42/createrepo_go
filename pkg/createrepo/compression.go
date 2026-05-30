@@ -19,22 +19,34 @@ import (
 type CompressionType int
 
 const (
+	// CompressionAuto detects compression from file suffix or magic bytes.
 	CompressionAuto CompressionType = iota
+	// CompressionUnknown represents an unsupported or unset compression type.
 	CompressionUnknown
+	// CompressionNone represents uncompressed metadata.
 	CompressionNone
+	// CompressionGzip represents gzip-compressed metadata.
 	CompressionGzip
+	// CompressionBzip2 represents bzip2-compressed metadata.
 	CompressionBzip2
+	// CompressionXZ represents xz-compressed metadata.
 	CompressionXZ
+	// CompressionZchunk represents zchunk-compressed metadata.
 	CompressionZchunk
+	// CompressionZstd represents zstd-compressed metadata.
 	CompressionZstd
 )
 
+// ErrUnsupportedCompression reports a recognized compression feature this
+// implementation cannot process.
 var ErrUnsupportedCompression = errors.New("unsupported compression")
 
 func (t CompressionType) String() string {
 	switch t {
 	case CompressionAuto:
 		return "auto"
+	case CompressionUnknown:
+		return "unknown"
 	case CompressionNone:
 		return "none"
 	case CompressionGzip:
@@ -73,6 +85,8 @@ func CompressionTypeFromName(name string) CompressionType {
 // Suffix returns the conventional filename suffix for a compression type.
 func (t CompressionType) Suffix() string {
 	switch t {
+	case CompressionAuto, CompressionUnknown, CompressionNone:
+		return ""
 	case CompressionGzip:
 		return ".gz"
 	case CompressionBzip2:
@@ -99,26 +113,8 @@ func DetectCompression(filename string) (CompressionType, error) {
 		return CompressionUnknown, fmt.Errorf("%s is not a regular file", filename)
 	}
 
-	switch {
-	case strings.HasSuffix(filename, ".gz"),
-		strings.HasSuffix(filename, ".gzip"),
-		strings.HasSuffix(filename, ".gunzip"):
-		return CompressionGzip, nil
-	case strings.HasSuffix(filename, ".bz2"),
-		strings.HasSuffix(filename, ".bzip2"):
-		return CompressionBzip2, nil
-	case strings.HasSuffix(filename, ".xz"):
-		return CompressionXZ, nil
-	case strings.HasSuffix(filename, ".zck"):
-		return CompressionZchunk, nil
-	case strings.HasSuffix(filename, ".zst"):
-		return CompressionZstd, nil
-	case strings.HasSuffix(filename, ".xml"),
-		strings.HasSuffix(filename, ".tar"),
-		strings.HasSuffix(filename, ".yaml"),
-		strings.HasSuffix(filename, ".sqlite"),
-		strings.HasSuffix(filename, ".txt"):
-		return CompressionNone, nil
+	if compression, ok := detectCompressionBySuffix(filename); ok {
+		return compression, nil
 	}
 
 	f, err := os.Open(filename)
@@ -136,23 +132,57 @@ func DetectCompression(filename string) (CompressionType, error) {
 		return CompressionNone, nil
 	}
 
-	switch {
-	case string(magic[:2]) == "\x1f\x8b":
-		return CompressionGzip, nil
-	case string(magic[:4]) == "\x28\xb5\x2f\xfd":
-		return CompressionZstd, nil
-	case string(magic[:2]) == "\x42\x5a":
-		return CompressionBzip2, nil
-	case string(magic) == "\xfd\x37\x7a\x58\x5a":
-		return CompressionXZ, nil
-	case string(magic) == "\x00ZCK1":
-		return CompressionZchunk, nil
+	if compression, ok := detectCompressionByMagic(magic); ok {
+		return compression, nil
 	}
 
 	if strings.Count(filepath.Base(filename), ".") >= 2 {
 		return CompressionUnknown, nil
 	}
 	return CompressionNone, nil
+}
+
+func detectCompressionBySuffix(filename string) (CompressionType, bool) {
+	switch {
+	case strings.HasSuffix(filename, ".gz"),
+		strings.HasSuffix(filename, ".gzip"),
+		strings.HasSuffix(filename, ".gunzip"):
+		return CompressionGzip, true
+	case strings.HasSuffix(filename, ".bz2"),
+		strings.HasSuffix(filename, ".bzip2"):
+		return CompressionBzip2, true
+	case strings.HasSuffix(filename, ".xz"):
+		return CompressionXZ, true
+	case strings.HasSuffix(filename, ".zck"):
+		return CompressionZchunk, true
+	case strings.HasSuffix(filename, ".zst"):
+		return CompressionZstd, true
+	case strings.HasSuffix(filename, ".xml"),
+		strings.HasSuffix(filename, ".tar"),
+		strings.HasSuffix(filename, ".yaml"),
+		strings.HasSuffix(filename, ".sqlite"),
+		strings.HasSuffix(filename, ".txt"):
+		return CompressionNone, true
+	default:
+		return CompressionUnknown, false
+	}
+}
+
+func detectCompressionByMagic(magic []byte) (CompressionType, bool) {
+	switch {
+	case string(magic[:2]) == "\x1f\x8b":
+		return CompressionGzip, true
+	case string(magic[:4]) == "\x28\xb5\x2f\xfd":
+		return CompressionZstd, true
+	case string(magic[:2]) == "\x42\x5a":
+		return CompressionBzip2, true
+	case string(magic) == "\xfd\x37\x7a\x58\x5a":
+		return CompressionXZ, true
+	case string(magic) == "\x00ZCK1":
+		return CompressionZchunk, true
+	default:
+		return CompressionUnknown, false
+	}
 }
 
 func detectCompressionBytes(filename string, data []byte) CompressionType {
@@ -192,6 +222,8 @@ func openReaderBytes(filename string, data []byte) (io.ReadCloser, error) {
 	compression := detectCompressionBytes(filename, data)
 	r := bytes.NewReader(data)
 	switch compression {
+	case CompressionAuto, CompressionUnknown:
+		return nil, fmt.Errorf("unknown compression type: %d", compression)
 	case CompressionNone:
 		return io.NopCloser(r), nil
 	case CompressionGzip:
@@ -240,12 +272,19 @@ func OpenReader(filename string, compression CompressionType) (io.ReadCloser, er
 	}
 
 	switch compression {
+	case CompressionAuto, CompressionUnknown:
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("unknown compression type: %d", compression)
 	case CompressionNone:
 		return f, nil
 	case CompressionGzip:
 		r, err := gzip.NewReader(f)
 		if err != nil {
-			f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				return nil, closeErr
+			}
 			return nil, err
 		}
 		return &compoundReadCloser{Reader: r, closers: []io.Closer{r, f}}, nil
@@ -254,22 +293,30 @@ func OpenReader(filename string, compression CompressionType) (io.ReadCloser, er
 	case CompressionXZ:
 		r, err := xz.NewReader(f)
 		if err != nil {
-			f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				return nil, closeErr
+			}
 			return nil, err
 		}
 		return &compoundReadCloser{Reader: r, closers: []io.Closer{f}}, nil
 	case CompressionZstd:
 		r, err := zstd.NewReader(f)
 		if err != nil {
-			f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				return nil, closeErr
+			}
 			return nil, err
 		}
 		return &compoundReadCloser{Reader: r, closers: []io.Closer{closeFunc(r.Close), f}}, nil
 	case CompressionZchunk:
-		f.Close()
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
 		return openZchunkReader(filename)
 	default:
-		f.Close()
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("unknown compression type: %d", compression)
 	}
 }
@@ -283,6 +330,7 @@ func (f closeFunc) Close() error {
 
 type compoundReadCloser struct {
 	io.Reader
+
 	closers []io.Closer
 }
 

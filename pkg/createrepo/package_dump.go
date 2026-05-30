@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
-	"strconv"
 )
 
 // DumpPrimary serializes packages as primary XML.
@@ -218,8 +217,4 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func itoa(n int64) string {
-	return strconv.FormatInt(n, 10)
 }

@@ -2,6 +2,7 @@ package createrepo
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -61,7 +62,7 @@ func ParsePrimary(r io.Reader) ([]Package, error) {
 
 	for {
 		tok, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -159,7 +160,7 @@ func parseFilelistsLike(r io.Reader, packages []Package, withDigest bool) ([]Pac
 
 	for {
 		tok, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -242,7 +243,7 @@ func ParseOther(r io.Reader, packages []Package) ([]Package, error) {
 
 	for {
 		tok, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

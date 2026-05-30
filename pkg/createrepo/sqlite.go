@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	// Register the pure-Go sqlite database/sql driver.
 	_ "modernc.org/sqlite"
 )
 

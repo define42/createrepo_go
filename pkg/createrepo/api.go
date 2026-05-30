@@ -1,3 +1,4 @@
+// Package createrepo creates, reads, modifies, and merges RPM repository metadata.
 package createrepo
 
 import (
@@ -216,6 +217,7 @@ type UpdateInfo struct {
 	Updates []UpdateRecord
 }
 
+// UpdateRecord is one advisory entry in updateinfo metadata.
 type UpdateRecord struct {
 	From            string
 	Status          string
@@ -237,6 +239,7 @@ type UpdateRecord struct {
 	Collections     []UpdateCollection
 }
 
+// UpdateReference links an update advisory to a related bug, CVE, or notice.
 type UpdateReference struct {
 	Href  string
 	ID    string
@@ -244,6 +247,7 @@ type UpdateReference struct {
 	Title string
 }
 
+// UpdateCollection groups packages affected by one update advisory.
 type UpdateCollection struct {
 	ShortName string
 	Name      string
@@ -251,6 +255,7 @@ type UpdateCollection struct {
 	Packages  []UpdateCollectionPackage
 }
 
+// UpdateCollectionModule describes module stream context for an advisory.
 type UpdateCollectionModule struct {
 	Name    string
 	Stream  string
@@ -259,6 +264,7 @@ type UpdateCollectionModule struct {
 	Arch    string
 }
 
+// UpdateCollectionPackage is one package listed in an update collection.
 type UpdateCollectionPackage struct {
 	Name             string
 	Version          string
@@ -728,11 +734,12 @@ func Merge(ctx context.Context, opts MergeOptions) error {
 					continue
 				}
 			}
-			if opts.OmitBaseURL {
+			switch {
+			case opts.OmitBaseURL:
 				pkg.LocationBase = ""
-			} else if pkg.LocationBase == "" {
+			case pkg.LocationBase == "":
 				pkg.LocationBase = repoBaseURL
-			} else {
+			default:
 				pkg.LocationBase = applyPrefixReplacement(pkg.LocationBase, opts.RepoPrefixSearch, opts.RepoPrefixReplace)
 			}
 			accumulator.Add(pkg, repoBaseURL)

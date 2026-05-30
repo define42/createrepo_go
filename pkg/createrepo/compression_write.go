@@ -19,6 +19,8 @@ func WriteCompressedFile(path string, data []byte, compression CompressionType) 
 
 	var encoded bytes.Buffer
 	switch compression {
+	case CompressionAuto, CompressionUnknown:
+		return fmt.Errorf("unknown compression type: %d", compression)
 	case CompressionNone:
 		encoded.Write(data)
 	case CompressionGzip:

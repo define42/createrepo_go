@@ -1,3 +1,4 @@
+// Package cli contains command-line adapters for the createrepo tools.
 package cli
 
 import (
@@ -14,6 +15,7 @@ import (
 	cr "github.com/define42/createrepo_go/pkg/createrepo"
 )
 
+// RunCreate executes the createrepo_c command.
 func RunCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var opts cr.Options
 	var quiet, verbose, version, useXZ, useZchunk bool
@@ -202,6 +204,7 @@ func parseAgeDuration(value string) (time.Duration, error) {
 	return time.Duration(n) * unit, nil
 }
 
+// RunModify executes the modifyrepo_c command.
 func RunModify(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var opts cr.ModifyOptions
 	var version, verbose bool
@@ -242,19 +245,20 @@ func RunModify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		compressionName = "zck"
 	}
 	opts.Compression = compressionFromFlag(compressionName)
-	if opts.BatchFile != "" {
+	switch {
+	case opts.BatchFile != "":
 		if fs.NArg() != 1 {
 			fmt.Fprintln(stderr, "Usage: modifyrepo_c --batchfile <batch file> <output repodata>")
 			return 2
 		}
 		opts.RepodataDir = fs.Arg(0)
-	} else if opts.RemoveType != "" {
+	case opts.RemoveType != "":
 		if fs.NArg() != 1 {
 			fmt.Fprintln(stderr, "Usage: modifyrepo_c --remove <metadata type> <output repodata>")
 			return 2
 		}
 		opts.RepodataDir = fs.Arg(0)
-	} else {
+	default:
 		if fs.NArg() != 2 {
 			fmt.Fprintln(stderr, "Usage: modifyrepo_c [options] <metadata> <output repodata>")
 			return 2
@@ -268,6 +272,7 @@ func RunModify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	return 0
 }
 
+// RunMerge executes the mergerepo_c command.
 func RunMerge(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var opts cr.MergeOptions
 	var version, useZchunk, verbose bool
@@ -334,6 +339,7 @@ func RunMerge(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	return 0
 }
 
+// RunSQLite executes the sqliterepo_c command.
 func RunSQLite(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var opts cr.SQLiteOptions
 	var version, quiet, verbose, useXZ, useZchunk bool
@@ -468,6 +474,7 @@ func ignoredBool(fs *flag.FlagSet, name string) {
 	fs.BoolVar(&v, name, false, "")
 }
 
+// Main runs a command adapter with process arguments and exits with its code.
 func Main(run func(context.Context, []string, io.Writer, io.Writer) int) {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
