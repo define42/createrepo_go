@@ -9,7 +9,7 @@ other applications.
 The Go module path is:
 
 ```text
-github.com/rpm-software-management/createrepo_c
+github.com/define42/createrepo_go
 ```
 
 ## Features
@@ -123,7 +123,7 @@ where useful so existing command lines can migrate gradually.
 Import the public package:
 
 ```go
-import "github.com/rpm-software-management/createrepo_c/pkg/createrepo"
+import "github.com/define42/createrepo_go/pkg/createrepo"
 ```
 
 Create repository metadata:

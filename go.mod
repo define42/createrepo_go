@@ -1,4 +1,4 @@
-module github.com/rpm-software-management/createrepo_c
+module github.com/define42/createrepo_go
 
 go 1.24
 

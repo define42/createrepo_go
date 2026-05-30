@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	cr "github.com/rpm-software-management/createrepo_c/pkg/createrepo"
+	cr "github.com/define42/createrepo_go/pkg/createrepo"
 )
 
 func RunCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int {

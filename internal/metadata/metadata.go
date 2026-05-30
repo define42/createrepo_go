@@ -3,7 +3,7 @@ package metadata
 import (
 	"io"
 
-	cr "github.com/rpm-software-management/createrepo_c/pkg/createrepo"
+	cr "github.com/define42/createrepo_go/pkg/createrepo"
 )
 
 type Package = cr.Package

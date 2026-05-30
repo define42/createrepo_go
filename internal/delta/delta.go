@@ -3,7 +3,7 @@ package delta
 import (
 	"context"
 
-	cr "github.com/rpm-software-management/createrepo_c/pkg/createrepo"
+	cr "github.com/define42/createrepo_go/pkg/createrepo"
 )
 
 // Generate creates one delta RPM.
