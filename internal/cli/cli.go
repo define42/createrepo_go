@@ -66,16 +66,16 @@ func RunCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs.StringVar(&opts.BaseDir, "basedir", "", "base directory for package locations")
 	fs.StringVar(&opts.GroupFile, "groupfile", "", "group metadata file")
 	fs.StringVar(&opts.GroupFile, "g", "", "group metadata file")
-	ignoredString(fs, "cachedir")
-	ignoredString(fs, "c")
+	fs.StringVar(&opts.CacheDir, "cachedir", "", "checksum cache directory")
+	fs.StringVar(&opts.CacheDir, "c", "", "checksum cache directory")
 	ignoredString(fs, "retain-old-md-by-age")
 	fs.StringVar(&opts.DuplicatedNEVRA, "duplicated-nevra", "keep-last", "duplicate NEVRA policy")
-	ignoredInt(fs, "workers")
-	ignoredInt(fs, "retain-old-md")
+	fs.IntVar(&opts.Workers, "workers", 0, "number of workers used to read packages")
+	fs.IntVar(&opts.RetainOldMD, "retain-old-md", 0, "number of superseded metadata versions to retain")
 	fs.IntVar(&opts.CutDirs, "cut-dirs", 0, "location href path components to ignore")
 	fs.BoolVar(&opts.Update, "update", false, "preserve additional metadata from an existing repository")
-	ignoredBool(fs, "skip-stat")
-	ignoredBool(fs, "split")
+	fs.BoolVar(&opts.SkipStat, "skip-stat", false, "skip stat() validation of cached checksums")
+	fs.BoolVar(&opts.Split, "split", false, "run in split media mode over multiple directories")
 	fs.BoolVar(&opts.SkipSymlinks, "skip-symlinks", false, "skip symlinked RPMs")
 	fs.BoolVar(&opts.SkipSymlinks, "S", false, "skip symlinked RPMs")
 	fs.BoolVar(&compatibility, "compatibility", false, "compatibility mode")
@@ -94,11 +94,19 @@ func RunCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stdout, "createrepo_c %s\n", cr.Version)
 		return 0
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "Usage: createrepo_c [options] <directory>")
-		return 2
+	if opts.Split {
+		if fs.NArg() < 1 {
+			fmt.Fprintln(stderr, "Usage: createrepo_c --split [options] <directory> [<directory>...]")
+			return 2
+		}
+		opts.SplitDirs = fs.Args()
+	} else {
+		if fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "Usage: createrepo_c [options] <directory>")
+			return 2
+		}
+		opts.Directory = fs.Arg(0)
 	}
-	opts.Directory = fs.Arg(0)
 	opts.Checksum = cr.ChecksumTypeFromName(checksumName)
 	opts.RepomdChecksum = checksumFromFlag(repomdChecksumName)
 	if useXZ {
@@ -220,30 +228,30 @@ func RunMerge(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs.StringVar(&opts.RepoPrefixReplace, "repo-prefix-replace", "", "replacement repository prefix")
 	fs.StringVar(&archList, "archlist", "", "comma-separated architectures to include")
 	fs.StringVar(&archList, "a", "", "comma-separated architectures to include")
-	ignoredString(fs, "method")
+	fs.StringVar(&opts.Method, "method", "repo", "merge method for duplicate name.arch: repo, ts, or nvr")
 	ignoredString(fs, "noarch-repo")
 	fs.StringVar(&opts.GroupFile, "groupfile", "", "group metadata file")
 	fs.StringVar(&opts.GroupFile, "g", "", "group metadata file")
-	ignoredString(fs, "blocked")
-	ignoredString(fs, "b")
+	fs.StringVar(&opts.BlockedFile, "blocked", "", "koji blocked package list file")
+	fs.StringVar(&opts.BlockedFile, "b", "", "koji blocked package list file")
 	fs.BoolVar(&opts.Database, "database", false, "generate sqlite metadata")
 	fs.BoolVar(&opts.Database, "d", false, "generate sqlite metadata")
 	fs.BoolVar(&noDatabase, "no-database", false, "do not generate sqlite metadata")
 	fs.BoolVar(&opts.FilelistsExt, "filelists-ext", false, "generate filelists-ext metadata")
 	ignoredBool(fs, "verbose")
 	ignoredBool(fs, "v")
-	ignoredBool(fs, "nogroups")
-	ignoredBool(fs, "noupdateinfo")
+	fs.BoolVar(&opts.NoGroups, "nogroups", false, "do not merge group/comps metadata")
+	fs.BoolVar(&opts.NoUpdateInfo, "noupdateinfo", false, "do not merge updateinfo metadata")
 	fs.BoolVar(&useZchunk, "zck", false, "use zchunk compression")
-	ignoredBool(fs, "all")
+	fs.BoolVar(&opts.AllVersions, "all", false, "keep all package versions, not just one per name.arch")
 	fs.BoolVar(&opts.UniqueMDFilenames, "unique-md-filenames", true, "checksum-prefix metadata filenames")
 	simpleNames := fs.Bool("simple-md-filenames", false, "do not checksum-prefix metadata filenames")
 	fs.BoolVar(&opts.OmitBaseURL, "omit-baseurl", false, "omit package location base URLs")
-	ignoredBool(fs, "koji")
-	ignoredBool(fs, "k")
+	fs.BoolVar(&opts.Koji, "koji", false, "koji merge mode (implies --all and --pkgorigins)")
+	fs.BoolVar(&opts.Koji, "k", false, "koji merge mode (implies --all and --pkgorigins)")
 	ignoredBool(fs, "simple")
-	ignoredBool(fs, "pkgorigins")
-	ignoredBool(fs, "arch-expand")
+	fs.BoolVar(&opts.PkgOrigins, "pkgorigins", false, "generate pkgorigins metadata")
+	fs.BoolVar(&opts.ArchExpand, "arch-expand", false, "include noarch packages regardless of --archlist")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -397,19 +405,9 @@ func ignoredString(fs *flag.FlagSet, name string) {
 	fs.StringVar(&v, name, "", "")
 }
 
-func ignoredStringArray(fs *flag.FlagSet, name string) {
-	var v stringSlice
-	fs.Var(&v, name, "")
-}
-
 func ignoredBool(fs *flag.FlagSet, name string) {
 	var v bool
 	fs.BoolVar(&v, name, false, "")
-}
-
-func ignoredInt(fs *flag.FlagSet, name string) {
-	var v int
-	fs.IntVar(&v, name, 0, "")
 }
 
 func Main(run func(context.Context, []string, io.Writer, io.Writer) int) {

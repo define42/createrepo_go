@@ -115,8 +115,47 @@ Generate SQLite metadata for an existing repository:
 sqliterepo_c /srv/repo
 ```
 
-Each command supports `--version`. Unsupported compatibility flags are accepted
-where useful so existing command lines can migrate gradually.
+Read packages in parallel and cache checksums between runs:
+
+```sh
+createrepo_c --workers 8 --cachedir /var/cache/createrepo /srv/repo
+```
+
+When updating a repository, keep a few superseded metadata versions instead of
+deleting them all:
+
+```sh
+createrepo_c --update --retain-old-md 2 /srv/repo
+```
+
+Generate metadata for split media (one repository spanning several
+directories); package locations are prefixed with each volume's directory name:
+
+```sh
+createrepo_c --split --outputdir /srv/repo disc1 disc2 disc3
+```
+
+Merge repositories, choosing how packages that share a name and architecture are
+resolved (`repo` keeps the first repo's package, `ts` the newest build, `nvr`
+the highest version):
+
+```sh
+mergerepo_c --method nvr --repo /srv/repo-a --repo /srv/repo-b --outputdir /srv/merged
+```
+
+Merge in Koji mode, which keeps every package version and records each
+package's origin repository in `pkgorigins` metadata:
+
+```sh
+mergerepo_c --koji --repo /srv/repo-a --repo /srv/repo-b --outputdir /srv/merged
+```
+
+Each command supports `--version`. The following createrepo_c flags are
+implemented: `--workers`, `--cachedir`, `--skip-stat`, `--retain-old-md`, and
+`--split`; and for mergerepo_c: `--method`, `--koji`, `--pkgorigins`,
+`--blocked`, `--all`, `--arch-expand`, `--nogroups`, and `--noupdateinfo`.
+Remaining unsupported compatibility flags are accepted but ignored so existing
+command lines can migrate gradually.
 
 ## Go API
 

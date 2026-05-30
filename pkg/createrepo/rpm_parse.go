@@ -13,6 +13,13 @@ import (
 
 // ParseRPMPackage reads one RPM header into the public package model.
 func ParseRPMPackage(path, repoRoot string, checksumType ChecksumType) (Package, error) {
+	return parseRPMPackageCached(path, repoRoot, checksumType, nil)
+}
+
+// parseRPMPackageCached is the internal worker behind ParseRPMPackage. When
+// cache is non-nil the package checksum is served from (and stored in) the
+// on-disk checksum cache instead of being recomputed every time.
+func parseRPMPackageCached(path, repoRoot string, checksumType ChecksumType, cache *checksumCache) (Package, error) {
 	rp, err := rpmfile.Open(path)
 	if err != nil {
 		return Package{}, err
@@ -21,7 +28,7 @@ func ParseRPMPackage(path, repoRoot string, checksumType ChecksumType) (Package,
 	if err != nil {
 		return Package{}, err
 	}
-	sum, err := ChecksumFile(path, checksumType)
+	sum, err := cache.ChecksumFile(path, checksumType, info)
 	if err != nil {
 		return Package{}, err
 	}
@@ -178,21 +185,24 @@ func convertChangelogs(rp *rpmfile.Package) []ChangelogEntry {
 
 func sortPackages(packages []Package) {
 	sort.Slice(packages, func(i, j int) bool {
-		a, b := packages[i], packages[j]
-		if a.Name != b.Name {
-			return a.Name < b.Name
-		}
-		if a.Arch != b.Arch {
-			return a.Arch < b.Arch
-		}
-		if a.Epoch != b.Epoch {
-			return a.Epoch < b.Epoch
-		}
-		if a.Version != b.Version {
-			return a.Version < b.Version
-		}
-		return a.Release < b.Release
+		return sortPackageLess(packages[i], packages[j])
 	})
+}
+
+func sortPackageLess(a, b Package) bool {
+	if a.Name != b.Name {
+		return a.Name < b.Name
+	}
+	if a.Arch != b.Arch {
+		return a.Arch < b.Arch
+	}
+	if a.Epoch != b.Epoch {
+		return a.Epoch < b.Epoch
+	}
+	if a.Version != b.Version {
+		return a.Version < b.Version
+	}
+	return a.Release < b.Release
 }
 
 func sortPackageFiles(files []PackageFile) {

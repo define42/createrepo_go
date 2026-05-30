@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -122,6 +123,12 @@ type Options struct {
 	OldPackageDirs            []string
 	NumDeltas                 int
 	MaxDeltaRPMSize           int64
+	Workers                   int
+	CacheDir                  string
+	SkipStat                  bool
+	RetainOldMD               int
+	Split                     bool
+	SplitDirs                 []string
 }
 
 type parsedPackage struct {
@@ -160,6 +167,14 @@ type MergeOptions struct {
 	OmitBaseURL       bool
 	RepoPrefixSearch  string
 	RepoPrefixReplace string
+	Method            string
+	AllVersions       bool
+	Koji              bool
+	PkgOrigins        bool
+	BlockedFile       string
+	ArchExpand        bool
+	NoGroups          bool
+	NoUpdateInfo      bool
 }
 
 // SQLiteOptions controls sqlite metadata generation.
@@ -255,11 +270,19 @@ func Create(ctx context.Context, opts Options) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if opts.Directory == "" {
+	if opts.Split {
+		if len(opts.SplitDirs) == 0 {
+			return fmt.Errorf("at least one directory is required in split mode")
+		}
+	} else if opts.Directory == "" {
 		return fmt.Errorf("repository directory is required")
 	}
 	if opts.OutputDir == "" {
-		opts.OutputDir = opts.Directory
+		if opts.Split {
+			opts.OutputDir = opts.SplitDirs[0]
+		} else {
+			opts.OutputDir = opts.Directory
+		}
 	}
 	if opts.Checksum == ChecksumUnknown {
 		opts.Checksum = ChecksumSHA256
@@ -282,35 +305,20 @@ func Create(ctx context.Context, opts Options) error {
 	} else if !opts.UniqueMDFilenames {
 		opts.UniqueMDFilenames = true
 	}
-	rpms, err := findRPMs(opts.Directory, opts.SkipSymlinks)
+	jobs, err := buildRPMJobs(opts)
 	if err != nil {
 		return err
 	}
-	rpms, err = filterRPMs(rpms, opts.Directory, opts.Excludes, opts.IncludePackages, opts.PackageListFiles)
+	cache, err := newChecksumCache(opts.CacheDir, opts.SkipStat)
 	if err != nil {
 		return err
 	}
-	var packages []Package
-	var parsedPackages []parsedPackage
-	locationRoot := opts.Directory
-	if opts.BaseDir != "" {
-		locationRoot = opts.BaseDir
-	}
-	for _, rpmPath := range rpms {
-		pkg, err := ParseRPMPackage(rpmPath, locationRoot, opts.Checksum)
-		if err != nil {
-			return err
-		}
-		pkg.LocationHref = applyLocationOptions(pkg.LocationHref, opts.CutDirs, opts.LocationPrefix)
-		pkg.LocationBase = opts.BaseURL
-		if opts.ChangelogLimit > 0 && len(pkg.Changelogs) > opts.ChangelogLimit {
-			pkg.Changelogs = pkg.Changelogs[:opts.ChangelogLimit]
-		}
-		packages = append(packages, pkg)
-		parsedPackages = append(parsedPackages, parsedPackage{Package: pkg, Path: rpmPath})
+	parsedPackages, err := parsePackagesParallel(ctx, jobs, opts, cache)
+	if err != nil {
+		return err
 	}
 	parsedPackages = applyParsedDuplicateNEVRAPolicy(parsedPackages, duplicatePolicy)
-	packages = packages[:0]
+	packages := make([]Package, 0, len(parsedPackages))
 	for _, parsed := range parsedPackages {
 		packages = append(packages, parsed.Package)
 	}
@@ -369,6 +377,7 @@ func Create(ctx context.Context, opts Options) error {
 		RepoTags:               opts.RepoTags,
 		ContentTags:            opts.ContentTags,
 		DistroTags:             opts.DistroTags,
+		RetainOldMD:            opts.RetainOldMD,
 	}); err != nil {
 		return err
 	}
@@ -394,6 +403,7 @@ type repositoryWriteOptions struct {
 	RepoTags               []string
 	ContentTags            []string
 	DistroTags             []DistroTag
+	RetainOldMD            int
 }
 
 type metadataItem struct {
@@ -404,6 +414,7 @@ type metadataItem struct {
 
 func writeRepositoryMetadata(outputDir string, packages []Package, opts repositoryWriteOptions) error {
 	repodataDir := filepath.Join(outputDir, "repodata")
+	previousFiles := previousMetadataFiles(repodataDir)
 	if err := os.MkdirAll(repodataDir, 0o755); err != nil {
 		return err
 	}
@@ -452,7 +463,80 @@ func writeRepositoryMetadata(outputDir string, packages []Package, opts reposito
 		}
 	}
 
-	return os.WriteFile(filepath.Join(repodataDir, "repomd.xml"), []byte(DumpRepomd(repomd)), 0o644)
+	if err := os.WriteFile(filepath.Join(repodataDir, "repomd.xml"), []byte(DumpRepomd(repomd)), 0o644); err != nil {
+		return err
+	}
+	pruneOldMetadataFiles(repodataDir, previousFiles, records, opts.RetainOldMD)
+	return nil
+}
+
+// previousMetadataFiles returns the repodata-relative file names referenced by
+// an existing repomd.xml, if one is present. These are the files that may be
+// superseded once new metadata is written.
+func previousMetadataFiles(repodataDir string) []string {
+	repomd, err := ParseRepomdFile(filepath.Join(repodataDir, "repomd.xml"))
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, record := range repomd.Records {
+		if name := filepath.Base(record.LocationHref); name != "" && name != "." {
+			files = append(files, name)
+		}
+	}
+	return files
+}
+
+// pruneOldMetadataFiles removes superseded metadata files from repodataDir,
+// retaining the newest retain files (by modification time). Pruning only runs
+// when a previous repomd.xml existed (previous is non-empty), so a fresh
+// repository is never touched. Files referenced by the freshly written repomd
+// and any repomd.xml* files (such as detached signatures) are always kept.
+func pruneOldMetadataFiles(repodataDir string, previous []string, current []*RepomdRecord, retain int) {
+	if len(previous) == 0 {
+		return
+	}
+	keep := map[string]bool{}
+	for _, record := range current {
+		keep[filepath.Base(record.LocationHref)] = true
+	}
+
+	entries, err := os.ReadDir(repodataDir)
+	if err != nil {
+		return
+	}
+	type candidate struct {
+		name    string
+		modTime int64
+	}
+	// Group superseded files by metadata kind (the name with its checksum
+	// prefix stripped) so --retain-old-md keeps N old versions per kind.
+	groups := map[string][]candidate{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || keep[name] || strings.HasPrefix(name, "repomd.xml") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		kind := stripObsoleteChecksumPrefix(name)
+		groups[kind] = append(groups[kind], candidate{name: name, modTime: info.ModTime().Unix()})
+	}
+	for _, stale := range groups {
+		if retain > 0 {
+			sort.Slice(stale, func(i, j int) bool { return stale[i].modTime > stale[j].modTime })
+			if retain < len(stale) {
+				stale = stale[retain:]
+			} else {
+				continue
+			}
+		}
+		for _, c := range stale {
+			_ = os.Remove(filepath.Join(repodataDir, c.name))
+		}
+	}
 }
 
 // Modify adds or removes metadata records in an existing repodata directory.
@@ -574,7 +658,22 @@ func Merge(ctx context.Context, opts MergeOptions) error {
 	} else if !opts.UniqueMDFilenames {
 		opts.UniqueMDFilenames = true
 	}
-	byPkgID := map[string]Package{}
+	method, err := parseMergeMethod(opts.Method)
+	if err != nil {
+		return err
+	}
+	// Koji mode keeps every package version and records their origins.
+	if opts.Koji {
+		opts.AllVersions = true
+		opts.PkgOrigins = true
+	}
+	blocked, err := loadBlockedNames(opts.BlockedFile)
+	if err != nil {
+		return err
+	}
+	accumulator := newMergeAccumulator(method, opts.AllVersions)
+	var updates []UpdateRecord
+	var groupItem *metadataItem
 	for _, repoPath := range opts.Repos {
 		repo, err := LoadMetadata(ctx, repoPath, LoadOptions{IgnoreSQLite: true})
 		if err != nil {
@@ -582,8 +681,13 @@ func Merge(ctx context.Context, opts MergeOptions) error {
 		}
 		repoBaseURL := applyPrefixReplacement(repoPath, opts.RepoPrefixSearch, opts.RepoPrefixReplace)
 		for _, pkg := range repo.Packages {
-			if len(opts.ArchList) > 0 && !stringInSlice(pkg.Arch, opts.ArchList) {
+			if blocked[pkg.Name] {
 				continue
+			}
+			if len(opts.ArchList) > 0 && !stringInSlice(pkg.Arch, opts.ArchList) {
+				if !(opts.ArchExpand && pkg.Arch == "noarch") {
+					continue
+				}
 			}
 			if opts.OmitBaseURL {
 				pkg.LocationBase = ""
@@ -592,14 +696,22 @@ func Merge(ctx context.Context, opts MergeOptions) error {
 			} else {
 				pkg.LocationBase = applyPrefixReplacement(pkg.LocationBase, opts.RepoPrefixSearch, opts.RepoPrefixReplace)
 			}
-			byPkgID[pkg.PkgID] = pkg
+			accumulator.Add(pkg, repoBaseURL)
+		}
+		if !opts.NoUpdateInfo && repo.UpdateInfo != nil {
+			updates = append(updates, repo.UpdateInfo.Updates...)
+		}
+		if groupItem == nil && opts.GroupFile == "" && !opts.NoGroups {
+			if item, ok := firstGroupMetadata(repoPath); ok {
+				groupItem = &item
+			}
 		}
 	}
-	packages := make([]Package, 0, len(byPkgID))
-	for _, pkg := range byPkgID {
-		packages = append(packages, pkg)
+	merged := accumulator.Packages()
+	packages := make([]Package, 0, len(merged))
+	for _, item := range merged {
+		packages = append(packages, item.pkg)
 	}
-	sortPackages(packages)
 	revision := opts.Revision
 	if revision == "" {
 		revision = fmt.Sprintf("%d", time.Now().Unix())
@@ -611,6 +723,15 @@ func Merge(ctx context.Context, opts MergeOptions) error {
 			return err
 		}
 		extraMetadata = append(extraMetadata, item)
+	} else if groupItem != nil {
+		extraMetadata = append(extraMetadata, *groupItem)
+	}
+	if !opts.NoUpdateInfo && len(updates) > 0 {
+		body := DumpUpdateInfo(&UpdateInfo{Updates: updates})
+		extraMetadata = append(extraMetadata, metadataItem{Type: "updateinfo", Name: "updateinfo.xml", Body: body})
+	}
+	if opts.PkgOrigins {
+		extraMetadata = append(extraMetadata, pkgOriginsMetadata(merged))
 	}
 	if err := writeRepositoryMetadata(opts.OutputDir, packages, repositoryWriteOptions{
 		Revision:          revision,
@@ -831,6 +952,21 @@ func additionalMetadataItemsFromRepo(repoPath string) ([]metadataItem, error) {
 		})
 	}
 	return items, nil
+}
+
+// firstGroupMetadata returns the comps/group metadata item from a repository,
+// if present, so mergerepo_c can carry groups over from the source repos.
+func firstGroupMetadata(repoPath string) (metadataItem, bool) {
+	items, err := additionalMetadataItemsFromRepo(repoPath)
+	if err != nil {
+		return metadataItem{}, false
+	}
+	for _, item := range items {
+		if item.Type == "group" {
+			return item, true
+		}
+	}
+	return metadataItem{}, false
 }
 
 func repomdPathAndRoot(path string) (string, string) {
