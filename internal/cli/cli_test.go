@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	cr "github.com/define42/createrepo_go/pkg/createrepo"
 )
@@ -107,6 +108,30 @@ func TestRunSQLiteInvalidRepo(t *testing.T) {
 	code := RunSQLite(context.Background(), []string{t.TempDir()}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestParseAgeDuration(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":    0,
+		"0":   0,
+		"30":  30 * time.Second,
+		"45s": 45 * time.Second,
+		"10m": 10 * time.Minute,
+		"24h": 24 * time.Hour,
+		"7d":  7 * 24 * time.Hour,
+		"2w":  2 * 7 * 24 * time.Hour,
+	}
+	for input, want := range cases {
+		got, err := parseAgeDuration(input)
+		if err != nil || got != want {
+			t.Errorf("parseAgeDuration(%q) = %v, %v; want %v", input, got, err, want)
+		}
+	}
+	for _, bad := range []string{"abc", "-5", "5y", "1.5d"} {
+		if _, err := parseAgeDuration(bad); err == nil {
+			t.Errorf("parseAgeDuration(%q) expected error", bad)
+		}
 	}
 }
 

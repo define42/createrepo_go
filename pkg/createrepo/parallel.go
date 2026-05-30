@@ -39,6 +39,7 @@ func parsePackagesParallel(ctx context.Context, jobs []rpmJob, opts Options, cac
 
 	results := make([]parsedPackage, len(jobs))
 	errs := make([]error, len(jobs))
+	skipped := make([]bool, len(jobs))
 	indexes := make(chan int)
 
 	var wg sync.WaitGroup
@@ -53,6 +54,15 @@ func parsePackagesParallel(ctx context.Context, jobs []rpmJob, opts Options, cac
 				}
 				pkg, err := parseRPMJob(jobs[idx], opts, cache)
 				if err != nil {
+					// Context cancellation is always fatal; a per-package
+					// failure is only skipped when SkipErrors is set.
+					if opts.SkipErrors && ctx.Err() == nil {
+						if opts.PackageErrorHandler != nil {
+							opts.PackageErrorHandler(jobs[idx].path, err)
+						}
+						skipped[idx] = true
+						continue
+					}
 					errs[idx] = err
 					continue
 				}
@@ -78,7 +88,25 @@ func parsePackagesParallel(ctx context.Context, jobs []rpmJob, opts Options, cac
 			return nil, err
 		}
 	}
-	return results, nil
+	if !sliceHasTrue(skipped) {
+		return results, nil
+	}
+	kept := results[:0]
+	for i := range results {
+		if !skipped[i] {
+			kept = append(kept, results[i])
+		}
+	}
+	return kept, nil
+}
+
+func sliceHasTrue(values []bool) bool {
+	for _, v := range values {
+		if v {
+			return true
+		}
+	}
+	return false
 }
 
 func parseRPMJob(job rpmJob, opts Options, cache *checksumCache) (Package, error) {

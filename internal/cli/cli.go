@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	cr "github.com/define42/createrepo_go/pkg/createrepo"
 )
@@ -68,7 +71,8 @@ func RunCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs.StringVar(&opts.GroupFile, "g", "", "group metadata file")
 	fs.StringVar(&opts.CacheDir, "cachedir", "", "checksum cache directory")
 	fs.StringVar(&opts.CacheDir, "c", "", "checksum cache directory")
-	ignoredString(fs, "retain-old-md-by-age")
+	var retainOldMDByAge string
+	fs.StringVar(&retainOldMDByAge, "retain-old-md-by-age", "", "remove superseded metadata older than this age (e.g. 7d, 24h)")
 	fs.StringVar(&opts.DuplicatedNEVRA, "duplicated-nevra", "keep-last", "duplicate NEVRA policy")
 	fs.IntVar(&opts.Workers, "workers", 0, "number of workers used to read packages")
 	fs.IntVar(&opts.RetainOldMD, "retain-old-md", 0, "number of superseded metadata versions to retain")
@@ -82,9 +86,10 @@ func RunCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	keepAllMetadata := fs.Bool("keep-all-metadata", true, "preserve additional metadata during update")
 	fs.BoolVar(&opts.DiscardAdditionalMetadata, "discard-additional-metadata", false, "discard additional metadata during update")
 	fs.BoolVar(&localSQLite, "local-sqlite", false, "generate sqlite metadata")
-	ignoredBool(fs, "recycle-pkglist")
-	ignoredBool(fs, "error-exit-val")
-	ignoredBool(fs, "ignore-lock")
+	fs.BoolVar(&opts.RecyclePkglist, "recycle-pkglist", false, "reuse the package list from existing metadata")
+	var errorExitVal bool
+	fs.BoolVar(&errorExitVal, "error-exit-val", false, "skip unreadable packages and exit 2 if any errors occurred")
+	fs.BoolVar(&opts.IgnoreLock, "ignore-lock", false, "remove a stale .repodata lock and continue")
 	fs.StringVar(&opts.LocationPrefix, "location-prefix", "", "package location href prefix")
 
 	if err := fs.Parse(args); err != nil {
@@ -139,15 +144,67 @@ func RunCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if localSQLite {
 		opts.Database = true
 	}
+	age, err := parseAgeDuration(retainOldMDByAge)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
+	opts.RetainOldMDByAge = age
+	var hadPackageErrors bool
+	if errorExitVal {
+		// The handler is invoked from parallel worker goroutines, so guard the
+		// shared flag and stderr writes.
+		var mu sync.Mutex
+		opts.SkipErrors = true
+		opts.PackageErrorHandler = func(path string, err error) {
+			mu.Lock()
+			defer mu.Unlock()
+			hadPackageErrors = true
+			if !quiet {
+				fmt.Fprintf(stderr, "Warning: skipping %s: %v\n", path, err)
+			}
+		}
+	}
 	if err := cr.Create(ctx, opts); err != nil {
 		return printError(stderr, quiet, verbose, err)
+	}
+	if errorExitVal && hadPackageErrors {
+		return 2
 	}
 	return 0
 }
 
+// parseAgeDuration parses an age specification such as "7d", "24h", "30m", or a
+// bare number of seconds, into a duration. An empty string yields 0.
+func parseAgeDuration(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	unit := time.Second
+	digits := value
+	switch value[len(value)-1] {
+	case 's':
+		unit, digits = time.Second, value[:len(value)-1]
+	case 'm':
+		unit, digits = time.Minute, value[:len(value)-1]
+	case 'h':
+		unit, digits = time.Hour, value[:len(value)-1]
+	case 'd':
+		unit, digits = 24*time.Hour, value[:len(value)-1]
+	case 'w':
+		unit, digits = 7*24*time.Hour, value[:len(value)-1]
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(digits))
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid age %q", value)
+	}
+	return time.Duration(n) * unit, nil
+}
+
 func RunModify(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var opts cr.ModifyOptions
-	var version bool
+	var version, verbose bool
 	var checksumName, compressionName string
 	var useZchunk bool
 	fs := flag.NewFlagSet("modifyrepo_c", flag.ContinueOnError)
@@ -166,7 +223,8 @@ func RunModify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs.StringVar(&opts.BatchFile, "batchfile", "", "batch file")
 	fs.StringVar(&opts.BatchFile, "f", "", "batch file")
 	ignoredString(fs, "zck-dict-dir")
-	ignoredBool(fs, "verbose")
+	fs.BoolVar(&verbose, "verbose", false, "verbose error output")
+	fs.BoolVar(&verbose, "v", false, "verbose error output")
 	fs.BoolVar(&useZchunk, "zck", false, "use zchunk compression")
 
 	if err := fs.Parse(args); err != nil {
@@ -205,14 +263,14 @@ func RunModify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		opts.RepodataDir = fs.Arg(1)
 	}
 	if err := cr.Modify(ctx, opts); err != nil {
-		return printError(stderr, false, false, err)
+		return printError(stderr, false, verbose, err)
 	}
 	return 0
 }
 
 func RunMerge(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var opts cr.MergeOptions
-	var version, useZchunk bool
+	var version, useZchunk, verbose bool
 	var repos stringSlice
 	var archList, compressionName string
 	var noDatabase bool
@@ -238,8 +296,8 @@ func RunMerge(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs.BoolVar(&opts.Database, "d", false, "generate sqlite metadata")
 	fs.BoolVar(&noDatabase, "no-database", false, "do not generate sqlite metadata")
 	fs.BoolVar(&opts.FilelistsExt, "filelists-ext", false, "generate filelists-ext metadata")
-	ignoredBool(fs, "verbose")
-	ignoredBool(fs, "v")
+	fs.BoolVar(&verbose, "verbose", false, "verbose error output")
+	fs.BoolVar(&verbose, "v", false, "verbose error output")
 	fs.BoolVar(&opts.NoGroups, "nogroups", false, "do not merge group/comps metadata")
 	fs.BoolVar(&opts.NoUpdateInfo, "noupdateinfo", false, "do not merge updateinfo metadata")
 	fs.BoolVar(&useZchunk, "zck", false, "use zchunk compression")
@@ -271,7 +329,7 @@ func RunMerge(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		opts.Database = false
 	}
 	if err := cr.Merge(ctx, opts); err != nil {
-		return printError(stderr, false, false, err)
+		return printError(stderr, false, verbose, err)
 	}
 	return 0
 }

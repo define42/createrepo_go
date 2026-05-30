@@ -127,8 +127,17 @@ type Options struct {
 	CacheDir                  string
 	SkipStat                  bool
 	RetainOldMD               int
+	RetainOldMDByAge          time.Duration
 	Split                     bool
 	SplitDirs                 []string
+	RecyclePkglist            bool
+	IgnoreLock                bool
+	SkipErrors                bool
+	// PackageErrorHandler, when set together with SkipErrors, is called for
+	// each package that fails to parse instead of aborting. It may be invoked
+	// concurrently from multiple worker goroutines and must be safe for such
+	// use.
+	PackageErrorHandler func(path string, err error)
 }
 
 type parsedPackage struct {
@@ -305,6 +314,18 @@ func Create(ctx context.Context, opts Options) error {
 	} else if !opts.UniqueMDFilenames {
 		opts.UniqueMDFilenames = true
 	}
+	releaseLock, err := acquireRepodataLock(opts.OutputDir, opts.IgnoreLock)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
+	if opts.RecyclePkglist {
+		recycled, err := recycledPackageList(ctx, opts.OutputDir)
+		if err != nil {
+			return err
+		}
+		opts.IncludePackages = append(append([]string{}, opts.IncludePackages...), recycled...)
+	}
 	jobs, err := buildRPMJobs(opts)
 	if err != nil {
 		return err
@@ -378,6 +399,7 @@ func Create(ctx context.Context, opts Options) error {
 		ContentTags:            opts.ContentTags,
 		DistroTags:             opts.DistroTags,
 		RetainOldMD:            opts.RetainOldMD,
+		RetainOldMDByAge:       opts.RetainOldMDByAge,
 	}); err != nil {
 		return err
 	}
@@ -404,6 +426,7 @@ type repositoryWriteOptions struct {
 	ContentTags            []string
 	DistroTags             []DistroTag
 	RetainOldMD            int
+	RetainOldMDByAge       time.Duration
 }
 
 type metadataItem struct {
@@ -466,7 +489,7 @@ func writeRepositoryMetadata(outputDir string, packages []Package, opts reposito
 	if err := os.WriteFile(filepath.Join(repodataDir, "repomd.xml"), []byte(DumpRepomd(repomd)), 0o644); err != nil {
 		return err
 	}
-	pruneOldMetadataFiles(repodataDir, previousFiles, records, opts.RetainOldMD)
+	pruneOldMetadataFiles(repodataDir, previousFiles, records, opts.RetainOldMD, opts.RetainOldMDByAge)
 	return nil
 }
 
@@ -487,12 +510,14 @@ func previousMetadataFiles(repodataDir string) []string {
 	return files
 }
 
-// pruneOldMetadataFiles removes superseded metadata files from repodataDir,
-// retaining the newest retain files (by modification time). Pruning only runs
-// when a previous repomd.xml existed (previous is non-empty), so a fresh
-// repository is never touched. Files referenced by the freshly written repomd
-// and any repomd.xml* files (such as detached signatures) are always kept.
-func pruneOldMetadataFiles(repodataDir string, previous []string, current []*RepomdRecord, retain int) {
+// pruneOldMetadataFiles removes superseded metadata files from repodataDir.
+// When age > 0 it removes every superseded file older than age (mirroring
+// --retain-old-md-by-age); otherwise it retains the newest retain files per
+// metadata kind (--retain-old-md). Pruning only runs when a previous
+// repomd.xml existed (previous is non-empty), so a fresh repository is never
+// touched. Files referenced by the freshly written repomd and any repomd.xml*
+// files (such as detached signatures) are always kept.
+func pruneOldMetadataFiles(repodataDir string, previous []string, current []*RepomdRecord, retain int, age time.Duration) {
 	if len(previous) == 0 {
 		return
 	}
@@ -507,7 +532,7 @@ func pruneOldMetadataFiles(repodataDir string, previous []string, current []*Rep
 	}
 	type candidate struct {
 		name    string
-		modTime int64
+		modTime time.Time
 	}
 	// Group superseded files by metadata kind (the name with its checksum
 	// prefix stripped) so --retain-old-md keeps N old versions per kind.
@@ -522,11 +547,25 @@ func pruneOldMetadataFiles(repodataDir string, previous []string, current []*Rep
 			continue
 		}
 		kind := stripObsoleteChecksumPrefix(name)
-		groups[kind] = append(groups[kind], candidate{name: name, modTime: info.ModTime().Unix()})
+		groups[kind] = append(groups[kind], candidate{name: name, modTime: info.ModTime()})
 	}
+
+	if age > 0 {
+		// Age-based retention takes precedence: drop anything older than age.
+		cutoff := time.Now().Add(-age)
+		for _, stale := range groups {
+			for _, c := range stale {
+				if c.modTime.Before(cutoff) {
+					_ = os.Remove(filepath.Join(repodataDir, c.name))
+				}
+			}
+		}
+		return
+	}
+
 	for _, stale := range groups {
 		if retain > 0 {
-			sort.Slice(stale, func(i, j int) bool { return stale[i].modTime > stale[j].modTime })
+			sort.Slice(stale, func(i, j int) bool { return stale[i].modTime.After(stale[j].modTime) })
 			if retain < len(stale) {
 				stale = stale[retain:]
 			} else {
@@ -952,6 +991,51 @@ func additionalMetadataItemsFromRepo(repoPath string) ([]metadataItem, error) {
 		})
 	}
 	return items, nil
+}
+
+// acquireRepodataLock creates a .repodata lock directory inside outputDir to
+// prevent concurrent createrepo runs from corrupting the same repository. If a
+// lock already exists it fails unless ignoreLock is set, in which case the
+// stale lock is removed and reacquired. The returned function releases it.
+func acquireRepodataLock(outputDir string, ignoreLock bool) (func(), error) {
+	if outputDir == "" {
+		return func() {}, nil
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return nil, err
+	}
+	lockDir := filepath.Join(outputDir, ".repodata")
+	err := os.Mkdir(lockDir, 0o755)
+	if os.IsExist(err) {
+		if !ignoreLock {
+			return nil, fmt.Errorf("lock %s already exists; another createrepo may be running (use --ignore-lock to override)", lockDir)
+		}
+		if err := os.RemoveAll(lockDir); err != nil {
+			return nil, err
+		}
+		err = os.Mkdir(lockDir, 0o755)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = os.RemoveAll(lockDir) }, nil
+}
+
+// recycledPackageList returns the package file basenames recorded in an
+// existing repository's metadata, for use as an include filter with
+// --recycle-pkglist. A repository without existing metadata yields no entries.
+func recycledPackageList(ctx context.Context, repoPath string) ([]string, error) {
+	repo, err := LoadMetadata(ctx, repoPath, LoadOptions{IgnoreSQLite: true})
+	if err != nil {
+		return nil, nil
+	}
+	names := make([]string, 0, len(repo.Packages))
+	for _, pkg := range repo.Packages {
+		if base := filepath.Base(pkg.LocationHref); base != "" && base != "." {
+			names = append(names, base)
+		}
+	}
+	return names, nil
 }
 
 // firstGroupMetadata returns the comps/group metadata item from a repository,

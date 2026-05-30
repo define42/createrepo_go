@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func pkgNVRA(name, epoch, version, release, arch string) Package {
@@ -192,6 +193,57 @@ func TestBuildRPMJobsSplit(t *testing.T) {
 	}
 }
 
+func TestAcquireRepodataLock(t *testing.T) {
+	dir := t.TempDir()
+	release, err := acquireRepodataLock(dir, false)
+	if err != nil {
+		t.Fatalf("first lock failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".repodata")); err != nil {
+		t.Fatalf("lock dir not created: %v", err)
+	}
+	// A second acquisition must fail while the lock is held.
+	if _, err := acquireRepodataLock(dir, false); err == nil {
+		t.Fatal("expected second lock to fail")
+	}
+	// ignoreLock overrides the existing lock.
+	release2, err := acquireRepodataLock(dir, true)
+	if err != nil {
+		t.Fatalf("ignoreLock acquisition failed: %v", err)
+	}
+	release2()
+	if _, err := os.Stat(filepath.Join(dir, ".repodata")); !os.IsNotExist(err) {
+		t.Fatal("lock dir not removed on release")
+	}
+	release() // releasing the stale handle must not panic or error
+}
+
+func TestPruneOldMetadataByAge(t *testing.T) {
+	repodata := t.TempDir()
+	prefix := func(c byte) string { return strings.Repeat(string(c), 64) }
+	oldFile := prefix('a') + "-primary.xml.gz"
+	cur := prefix('c') + "-primary.xml.gz"
+	for _, name := range []string{oldFile, cur} {
+		if err := os.WriteFile(filepath.Join(repodata, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Backdate the superseded file well beyond the age threshold.
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(filepath.Join(repodata, oldFile), old, old); err != nil {
+		t.Fatal(err)
+	}
+	current := []*RepomdRecord{{Type: "primary", LocationHref: "repodata/" + cur}}
+	pruneOldMetadataFiles(repodata, []string{oldFile}, current, 0, 24*time.Hour)
+
+	if _, err := os.Stat(filepath.Join(repodata, oldFile)); !os.IsNotExist(err) {
+		t.Fatal("aged-out file should have been pruned")
+	}
+	if _, err := os.Stat(filepath.Join(repodata, cur)); err != nil {
+		t.Fatal("current file should be kept")
+	}
+}
+
 func TestPruneOldMetadataRetention(t *testing.T) {
 	repodata := t.TempDir()
 	// Real metadata uses 64-char sha256 filename prefixes; the retention
@@ -211,7 +263,7 @@ func TestPruneOldMetadataRetention(t *testing.T) {
 	writeFile(cur)
 
 	// previous non-empty so pruning runs; retain 1 old version.
-	pruneOldMetadataFiles(repodata, []string{oldA}, current, 1)
+	pruneOldMetadataFiles(repodata, []string{oldA}, current, 1, 0)
 	remaining := map[string]bool{}
 	entries, _ := os.ReadDir(repodata)
 	for _, e := range entries {

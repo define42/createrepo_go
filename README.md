@@ -150,12 +150,24 @@ package's origin repository in `pkgorigins` metadata:
 mergerepo_c --koji --repo /srv/repo-a --repo /srv/repo-b --outputdir /srv/merged
 ```
 
+Skip unreadable packages and report a non-zero exit status, override a stale
+lock, or prune old metadata by age:
+
+```sh
+createrepo_c --error-exit-val --ignore-lock --retain-old-md-by-age 14d /srv/repo
+```
+
 Each command supports `--version`. The following createrepo_c flags are
-implemented: `--workers`, `--cachedir`, `--skip-stat`, `--retain-old-md`, and
-`--split`; and for mergerepo_c: `--method`, `--koji`, `--pkgorigins`,
-`--blocked`, `--all`, `--arch-expand`, `--nogroups`, and `--noupdateinfo`.
-Remaining unsupported compatibility flags are accepted but ignored so existing
-command lines can migrate gradually.
+implemented: `--workers`, `--cachedir`, `--skip-stat`, `--retain-old-md`,
+`--retain-old-md-by-age`, `--split`, `--recycle-pkglist`, `--error-exit-val`,
+and `--ignore-lock`; and for mergerepo_c: `--method`, `--koji`, `--pkgorigins`,
+`--blocked`, `--all`, `--arch-expand`, `--nogroups`, `--noupdateinfo`, and
+`--verbose`.
+
+`--retain-old-md-by-age` accepts an age such as `30` (seconds), `45s`, `10m`,
+`24h`, `7d`, or `2w`. A few highly tool-specific flags remain accepted but
+ignored (`--noarch-repo` and `--simple` for mergerepo_c, and `--zck-dict-dir`
+for modifyrepo_c) so existing command lines keep working.
 
 ## Go API
 
